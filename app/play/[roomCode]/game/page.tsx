@@ -45,81 +45,88 @@ export default function GamePage({
   const router = useRouter();
   const supabase = createClient();
 
-  // Load session
+  // Load session and check for question passed from lobby
   useEffect(() => {
     const stored = sessionStorage.getItem(`player_${roomCode}`);
     if (!stored) {
       router.push(`/play?code=${roomCode}`);
       return;
     }
-    setSession(JSON.parse(stored));
+    const s = JSON.parse(stored) as PlayerSession;
+    setSession(s);
+
+    // Check if lobby page passed question data via sessionStorage
+    const savedQuestion = sessionStorage.getItem(`game_question_${roomCode}`);
+    if (savedQuestion) {
+      const { question, question_index } = JSON.parse(savedQuestion);
+      sessionStorage.removeItem(`game_question_${roomCode}`);
+      setCurrentQuestion(question);
+      setQuestionIndex(question_index);
+      setCountdown(question.time_limit_sec || 15);
+      setPhase("question");
+    } else {
+      // No saved question - fetch current state from DB
+      fetchCurrentStateFromDB(s);
+    }
   }, [roomCode, router]);
 
-  // Fetch current question on page load (fixes issue where player misses first broadcast)
-  useEffect(() => {
-    if (!session) return;
+  const fetchCurrentStateFromDB = async (s: PlayerSession) => {
+    const { data: event } = await supabase
+      .from("events")
+      .select("status, current_question_index")
+      .eq("id", s.event_id)
+      .single();
 
-    const fetchCurrentState = async () => {
-      // Get event status and current question index
-      const { data: event } = await supabase
-        .from("events")
-        .select("status, current_question_index")
-        .eq("id", session.event_id)
-        .single();
+    if (!event) {
+      setPhase("waiting");
+      return;
+    }
 
-      if (!event) return;
+    if (event.status === "finished") {
+      setPhase("finished");
+      return;
+    }
 
-      if (event.status === "finished") {
-        setPhase("finished");
-        return;
-      }
+    if (event.status === "active" && event.current_question_index >= 0) {
+      const { data: questions } = await supabase
+        .from("questions")
+        .select("id, event_id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec, created_at")
+        .eq("event_id", s.event_id)
+        .order("order_index", { ascending: true });
 
-      if (event.status === "active" && event.current_question_index >= 0) {
-        // Fetch all questions to get the current one
-        const { data: questions } = await supabase
-          .from("questions")
-          .select("id, event_id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec, created_at")
-          .eq("event_id", session.event_id)
-          .order("order_index", { ascending: true });
+      if (questions && questions[event.current_question_index]) {
+        const q = questions[event.current_question_index];
 
-        if (questions && questions[event.current_question_index]) {
-          const q = questions[event.current_question_index];
+        // Check if player already answered this question
+        const { data: existingAnswer } = await supabase
+          .from("answers")
+          .select("id, is_correct, score, selected_choice")
+          .eq("participant_id", s.participant_id)
+          .eq("question_id", q.id)
+          .single();
 
-          // Check if player already answered this question
-          const { data: existingAnswer } = await supabase
-            .from("answers")
-            .select("id, is_correct, score, selected_choice")
-            .eq("participant_id", session.participant_id)
-            .eq("question_id", q.id)
-            .single();
-
-          if (existingAnswer) {
-            // Already answered
-            setCurrentQuestion(q);
-            setQuestionIndex(event.current_question_index);
-            setSelectedChoice(existingAnswer.selected_choice);
-            setAnswerResult({
-              is_correct: existingAnswer.is_correct,
-              score: existingAnswer.score,
-            });
-            setPhase("answered");
-          } else {
-            // Show question for answering
-            setCurrentQuestion(q);
-            setQuestionIndex(event.current_question_index);
-            setCountdown(q.time_limit_sec || 15);
-            setPhase("question");
-          }
+        if (existingAnswer) {
+          setCurrentQuestion(q);
+          setQuestionIndex(event.current_question_index);
+          setSelectedChoice(existingAnswer.selected_choice);
+          setAnswerResult({
+            is_correct: existingAnswer.is_correct,
+            score: existingAnswer.score,
+          });
+          setPhase("answered");
         } else {
-          setPhase("waiting");
+          setCurrentQuestion(q);
+          setQuestionIndex(event.current_question_index);
+          setCountdown(q.time_limit_sec || 15);
+          setPhase("question");
         }
       } else {
         setPhase("waiting");
       }
-    };
-
-    fetchCurrentState();
-  }, [session, supabase]);
+    } else {
+      setPhase("waiting");
+    }
+  };
 
   // Subscribe to game events
   useEffect(() => {

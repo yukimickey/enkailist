@@ -76,6 +76,16 @@ export default function LobbyPage({
       .on("broadcast", { event: "game_signal" }, (payload) => {
         const data = payload.payload as BroadcastPayload;
         if (data.type === "start" || data.type === "question") {
+          // Save question data to sessionStorage so game page can load it immediately
+          if (data.question) {
+            sessionStorage.setItem(
+              `game_question_${roomCode}`,
+              JSON.stringify({
+                question: data.question,
+                question_index: data.question_index ?? 0,
+              })
+            );
+          }
           router.push(`/play/${roomCode}/game`);
         }
       })
