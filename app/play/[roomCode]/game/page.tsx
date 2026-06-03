@@ -78,7 +78,7 @@ export default function GamePage({
         // Fetch all questions to get the current one
         const { data: questions } = await supabase
           .from("questions")
-          .select("id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec")
+          .select("id, event_id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec, created_at")
           .eq("event_id", session.event_id)
           .order("order_index", { ascending: true });
 
