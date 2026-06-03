@@ -13,7 +13,7 @@ interface PlayerSession {
   nickname: string;
 }
 
-type GamePhase = "waiting" | "question" | "answered" | "reveal" | "finished";
+type GamePhase = "loading" | "waiting" | "question" | "answered" | "reveal" | "finished";
 
 const choiceColors: Record<Choice, { bg: string; hover: string }> = {
   a: { bg: "bg-red-500", hover: "active:bg-red-600" },
@@ -31,7 +31,7 @@ export default function GamePage({
 }) {
   const { roomCode } = use(params);
   const [session, setSession] = useState<PlayerSession | null>(null);
-  const [phase, setPhase] = useState<GamePhase>("waiting");
+  const [phase, setPhase] = useState<GamePhase>("loading");
   const [currentQuestion, setCurrentQuestion] = useState<QuestionWithoutAnswer | null>(null);
   const [questionIndex, setQuestionIndex] = useState(0);
   const [selectedChoice, setSelectedChoice] = useState<Choice | null>(null);
@@ -54,6 +54,72 @@ export default function GamePage({
     }
     setSession(JSON.parse(stored));
   }, [roomCode, router]);
+
+  // Fetch current question on page load (fixes issue where player misses first broadcast)
+  useEffect(() => {
+    if (!session) return;
+
+    const fetchCurrentState = async () => {
+      // Get event status and current question index
+      const { data: event } = await supabase
+        .from("events")
+        .select("status, current_question_index")
+        .eq("id", session.event_id)
+        .single();
+
+      if (!event) return;
+
+      if (event.status === "finished") {
+        setPhase("finished");
+        return;
+      }
+
+      if (event.status === "active" && event.current_question_index >= 0) {
+        // Fetch all questions to get the current one
+        const { data: questions } = await supabase
+          .from("questions")
+          .select("id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec")
+          .eq("event_id", session.event_id)
+          .order("order_index", { ascending: true });
+
+        if (questions && questions[event.current_question_index]) {
+          const q = questions[event.current_question_index];
+
+          // Check if player already answered this question
+          const { data: existingAnswer } = await supabase
+            .from("answers")
+            .select("id, is_correct, score, selected_choice")
+            .eq("participant_id", session.participant_id)
+            .eq("question_id", q.id)
+            .single();
+
+          if (existingAnswer) {
+            // Already answered
+            setCurrentQuestion(q);
+            setQuestionIndex(event.current_question_index);
+            setSelectedChoice(existingAnswer.selected_choice);
+            setAnswerResult({
+              is_correct: existingAnswer.is_correct,
+              score: existingAnswer.score,
+            });
+            setPhase("answered");
+          } else {
+            // Show question for answering
+            setCurrentQuestion(q);
+            setQuestionIndex(event.current_question_index);
+            setCountdown(q.time_limit_sec || 15);
+            setPhase("question");
+          }
+        } else {
+          setPhase("waiting");
+        }
+      } else {
+        setPhase("waiting");
+      }
+    };
+
+    fetchCurrentState();
+  }, [session, supabase]);
 
   // Subscribe to game events
   useEffect(() => {
@@ -137,7 +203,7 @@ export default function GamePage({
     [session, currentQuestion, phase]
   );
 
-  if (!session) {
+  if (!session || phase === "loading") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-900">
         <LoadingSpinner size="lg" />
@@ -148,6 +214,18 @@ export default function GamePage({
   const getChoiceValue = (q: QuestionWithoutAnswer, choice: Choice): string => {
     const map = { a: q.choice_a, b: q.choice_b, c: q.choice_c, d: q.choice_d };
     return map[choice];
+  };
+
+  // Helper to get correct answer text for reveal
+  const getCorrectAnswerText = (): string => {
+    if (!correctChoice || !currentQuestion) return "";
+    return `${correctChoice.toUpperCase()}. ${getChoiceValue(currentQuestion, correctChoice)}`;
+  };
+
+  // Helper to get selected answer text for reveal
+  const getSelectedAnswerText = (): string => {
+    if (!selectedChoice || !currentQuestion) return "";
+    return `${selectedChoice.toUpperCase()}. ${getChoiceValue(currentQuestion, selectedChoice)}`;
   };
 
   return (
@@ -212,12 +290,16 @@ export default function GamePage({
         {/* ANSWERED - Waiting for reveal */}
         {phase === "answered" && (
           <div className="text-center space-y-4 max-w-sm">
-            {selectedChoice && (
-              <div
-                className={`${choiceColors[selectedChoice].bg} w-24 h-24 rounded-2xl flex items-center justify-center text-4xl font-black mx-auto`}
-              >
-                {selectedChoice.toUpperCase()}
-              </div>
+            {selectedChoice && currentQuestion && (
+              <>
+                <div
+                  className={`${choiceColors[selectedChoice].bg} rounded-2xl p-6 mx-auto`}
+                >
+                  <p className="text-lg font-black">
+                    {selectedChoice.toUpperCase()}. {getChoiceValue(currentQuestion, selectedChoice)}
+                  </p>
+                </div>
+              </>
             )}
             <p className="text-xl font-bold">回答済み！</p>
             <p className="text-gray-400">正解発表をお待ちください...</p>
@@ -231,7 +313,7 @@ export default function GamePage({
 
         {/* REVEAL */}
         {phase === "reveal" && (
-          <div className="text-center space-y-6 max-w-sm">
+          <div className="text-center space-y-6 max-w-sm w-full">
             {answerResult ? (
               answerResult.is_correct ? (
                 <div className="space-y-3">
@@ -242,31 +324,32 @@ export default function GamePage({
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-4">
                   <div className="text-6xl">❌</div>
                   <p className="text-3xl font-black text-red-400">不正解</p>
-                  {correctChoice && (
-                    <p className="text-gray-400">
-                      正解は{" "}
-                      <span className="font-bold text-white">
-                        {correctChoice.toUpperCase()}
-                      </span>{" "}
-                      でした
-                    </p>
+                  {selectedChoice && currentQuestion && (
+                    <div className="bg-gray-800 rounded-xl p-4">
+                      <p className="text-xs text-gray-400 mb-1">あなたの回答</p>
+                      <p className="font-bold text-gray-300">{getSelectedAnswerText()}</p>
+                    </div>
+                  )}
+                  {correctChoice && currentQuestion && (
+                    <div className="bg-green-900/30 border border-green-500/50 rounded-xl p-4">
+                      <p className="text-xs text-green-400 mb-1">正解</p>
+                      <p className="font-bold text-green-300">{getCorrectAnswerText()}</p>
+                    </div>
                   )}
                 </div>
               )
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <div className="text-6xl">⏰</div>
                 <p className="text-2xl font-bold text-gray-400">時間切れ</p>
-                {correctChoice && (
-                  <p className="text-gray-400">
-                    正解は{" "}
-                    <span className="font-bold text-white">
-                      {correctChoice.toUpperCase()}
-                    </span>
-                  </p>
+                {correctChoice && currentQuestion && (
+                  <div className="bg-green-900/30 border border-green-500/50 rounded-xl p-4">
+                    <p className="text-xs text-green-400 mb-1">正解</p>
+                    <p className="font-bold text-green-300">{getCorrectAnswerText()}</p>
+                  </div>
                 )}
               </div>
             )}
