@@ -24,7 +24,8 @@ export default function LoginPage() {
     });
 
     if (error) {
-      toast.error("ログインに失敗しました。メールアドレスとパスワードを確認してください。");
+      console.error("Login error:", error.message, error.status, error);
+      toast.error(`ログイン失敗: ${error.message}`);
       setLoading(false);
       return;
     }

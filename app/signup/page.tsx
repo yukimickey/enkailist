@@ -19,7 +19,7 @@ export default function SignupPage() {
     e.preventDefault();
     setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -27,13 +27,21 @@ export default function SignupPage() {
       },
     });
 
+    console.log("Signup response:", { data, error });
+
     if (error) {
-      toast.error(error.message);
+      toast.error(`登録失敗: ${error.message}`);
       setLoading(false);
       return;
     }
 
-    toast.success("アカウントを作成しました。メールを確認してください。");
+    if (data?.user?.identities?.length === 0) {
+      toast.error("このメールアドレスは既に登録されています。");
+      setLoading(false);
+      return;
+    }
+
+    toast.success("アカウントを作成しました！ログインしてください。");
     router.push("/login");
   };
 
