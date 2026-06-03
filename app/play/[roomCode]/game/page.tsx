@@ -45,90 +45,60 @@ export default function GamePage({
   const router = useRouter();
   const supabase = createClient();
 
-  // Load session and check for question passed from lobby
+  // Load session
   useEffect(() => {
     const stored = sessionStorage.getItem(`player_${roomCode}`);
     if (!stored) {
       router.push(`/play?code=${roomCode}`);
       return;
     }
-    const s = JSON.parse(stored) as PlayerSession;
-    setSession(s);
-
-    // Check if lobby page passed question data via sessionStorage
-    const savedQuestion = sessionStorage.getItem(`game_question_${roomCode}`);
-    if (savedQuestion) {
-      const { question, question_index } = JSON.parse(savedQuestion);
-      sessionStorage.removeItem(`game_question_${roomCode}`);
-      setCurrentQuestion(question);
-      setQuestionIndex(question_index);
-      setCountdown(question.time_limit_sec || 15);
-      setPhase("question");
-    } else {
-      // No saved question - fetch current state from DB
-      fetchCurrentStateFromDB(s);
-    }
+    setSession(JSON.parse(stored));
   }, [roomCode, router]);
 
-  const fetchCurrentStateFromDB = async (s: PlayerSession) => {
-    const { data: event } = await supabase
-      .from("events")
-      .select("status, current_question_index")
-      .eq("id", s.event_id)
-      .single();
+  // Fetch current question from API on page load
+  useEffect(() => {
+    if (!session) return;
 
-    if (!event) {
-      setPhase("waiting");
-      return;
-    }
+    const fetchCurrentQuestion = async () => {
+      try {
+        const res = await fetch(
+          `/api/events/${session.event_id}/current-question?participant_id=${session.participant_id}`
+        );
+        const data = await res.json();
 
-    if (event.status === "finished") {
-      setPhase("finished");
-      return;
-    }
-
-    if (event.status === "active" && event.current_question_index >= 0) {
-      const { data: questions } = await supabase
-        .from("questions")
-        .select("id, event_id, question_text, choice_a, choice_b, choice_c, choice_d, order_index, time_limit_sec, created_at")
-        .eq("event_id", s.event_id)
-        .order("order_index", { ascending: true });
-
-      if (questions && questions[event.current_question_index]) {
-        const q = questions[event.current_question_index];
-
-        // Check if player already answered this question
-        const { data: existingAnswer } = await supabase
-          .from("answers")
-          .select("id, is_correct, score, selected_choice")
-          .eq("participant_id", s.participant_id)
-          .eq("question_id", q.id)
-          .single();
-
-        if (existingAnswer) {
-          setCurrentQuestion(q);
-          setQuestionIndex(event.current_question_index);
-          setSelectedChoice(existingAnswer.selected_choice);
-          setAnswerResult({
-            is_correct: existingAnswer.is_correct,
-            score: existingAnswer.score,
-          });
-          setPhase("answered");
-        } else {
-          setCurrentQuestion(q);
-          setQuestionIndex(event.current_question_index);
-          setCountdown(q.time_limit_sec || 15);
-          setPhase("question");
+        switch (data.phase) {
+          case "question":
+            setCurrentQuestion(data.question);
+            setQuestionIndex(data.question_index);
+            setCountdown(data.question.time_limit_sec || 15);
+            setPhase("question");
+            break;
+          case "answered":
+            setCurrentQuestion(data.question);
+            setQuestionIndex(data.question_index);
+            setSelectedChoice(data.answer.selected_choice);
+            setAnswerResult({
+              is_correct: data.answer.is_correct,
+              score: data.answer.score,
+            });
+            setTotalScore((prev) => prev + data.answer.score);
+            setPhase("answered");
+            break;
+          case "finished":
+            setPhase("finished");
+            break;
+          default:
+            setPhase("waiting");
         }
-      } else {
+      } catch {
         setPhase("waiting");
       }
-    } else {
-      setPhase("waiting");
-    }
-  };
+    };
 
-  // Subscribe to game events
+    fetchCurrentQuestion();
+  }, [session]);
+
+  // Subscribe to game events via broadcast
   useEffect(() => {
     if (!session) return;
 
@@ -223,13 +193,11 @@ export default function GamePage({
     return map[choice];
   };
 
-  // Helper to get correct answer text for reveal
   const getCorrectAnswerText = (): string => {
     if (!correctChoice || !currentQuestion) return "";
     return `${correctChoice.toUpperCase()}. ${getChoiceValue(currentQuestion, correctChoice)}`;
   };
 
-  // Helper to get selected answer text for reveal
   const getSelectedAnswerText = (): string => {
     if (!selectedChoice || !currentQuestion) return "";
     return `${selectedChoice.toUpperCase()}. ${getChoiceValue(currentQuestion, selectedChoice)}`;
@@ -257,7 +225,6 @@ export default function GamePage({
         {/* QUESTION - Answer Buttons */}
         {phase === "question" && currentQuestion && (
           <div className="w-full max-w-md space-y-4">
-            {/* Countdown */}
             <div className="text-center">
               <div
                 className={`inline-flex items-center justify-center w-16 h-16 rounded-full text-3xl font-black ${
@@ -294,19 +261,17 @@ export default function GamePage({
           </div>
         )}
 
-        {/* ANSWERED - Waiting for reveal */}
+        {/* ANSWERED */}
         {phase === "answered" && (
           <div className="text-center space-y-4 max-w-sm">
             {selectedChoice && currentQuestion && (
-              <>
-                <div
-                  className={`${choiceColors[selectedChoice].bg} rounded-2xl p-6 mx-auto`}
-                >
-                  <p className="text-lg font-black">
-                    {selectedChoice.toUpperCase()}. {getChoiceValue(currentQuestion, selectedChoice)}
-                  </p>
-                </div>
-              </>
+              <div
+                className={`${choiceColors[selectedChoice].bg} rounded-2xl p-6 mx-auto`}
+              >
+                <p className="text-lg font-black">
+                  {selectedChoice.toUpperCase()}. {getChoiceValue(currentQuestion, selectedChoice)}
+                </p>
+              </div>
             )}
             <p className="text-xl font-bold">回答済み！</p>
             <p className="text-gray-400">正解発表をお待ちください...</p>
@@ -326,6 +291,11 @@ export default function GamePage({
                 <div className="space-y-3">
                   <div className="text-6xl">⭕</div>
                   <p className="text-3xl font-black text-green-400">正解！</p>
+                  {selectedChoice && currentQuestion && (
+                    <div className="bg-green-900/30 border border-green-500/50 rounded-xl p-4">
+                      <p className="font-bold text-green-300">{getSelectedAnswerText()}</p>
+                    </div>
+                  )}
                   <p className="text-2xl font-bold text-primary">
                     +{answerResult.score}pt
                   </p>
